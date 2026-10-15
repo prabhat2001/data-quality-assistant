@@ -1,28 +1,3 @@
-The keychain erase did not take. Git pushed again immediately and never asked for a username, so it is still using the old GitHub token. That token signs in as prabhat2001 but cannot write to this repository.
-
-Force this one push to ignore the saved token and ask for a new one:
-
-
-git -c credential.helper= push -u origin main
-When it asks:
-
-Username: prabhat2001
-Password: a new personal access token, not your GitHub password
-Create that token while logged in as prabhat2001 at github.com/settings/tokens. For a classic token, turn on the repo scope. For a fine-grained token, set the resource owner to prabhat2001, select only data-quality-assistant, and set Contents to Read and write.
-
-If it still does not prompt, delete the saved login by hand: open Keychain Access, search for github.com, and delete every internet password for that site. Then run the same push command again.
-
-The repository must already exist at github.com/prabhat2001/data-quality-assistant. Create it empty on GitHub first if that page is missing.
-
-
-The repository is now on GitHub under prabhat2001. Future pushes from this folder can use git push.
-
-
-I can’t edit files in Ask mode. I’ll read the current instructions and draft the replacement text so you can paste it, or switch to Agent mode and I’ll write the file.
-
-Ask mode can only show the new text. Switch to Agent mode if you want this written into INSTRUCTIONS.md.
-
-
 # Before you submit
 The assignment is graded on a working product, the OpenAI and Great Expectations integration, and the write-up. Walk through this list on a machine that can run the app.
 ## Start clean
