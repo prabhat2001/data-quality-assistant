@@ -1,0 +1,27 @@
+# Python
+backend/.venv/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Secrets and local env
+.env
+backend/.env
+frontend/.env
+frontend/.env.local
+
+# Node
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/tsconfig.tsbuildinfo
+
+# Great Expectations artifacts
+great_expectations/
+uncommitted/
+gx/
+
+# OS and editors
+.DS_Store
+*.log
