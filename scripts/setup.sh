@@ -13,7 +13,7 @@ fi
 
 if [[ ! -f "$ROOT/backend/.env" ]]; then
   cp "$ROOT/backend/.env.example" "$ROOT/backend/.env"
-  echo "Created backend/.env from the example. Set DATABASE_URL and, if you have one, GEMINI_API_KEY."
+  echo "Created backend/.env from the example. Set DATABASE_URL. OPENAI_API_KEY is already filled in for rule generation."
 fi
 
 cd "$ROOT/frontend"

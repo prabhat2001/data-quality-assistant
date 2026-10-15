@@ -11,8 +11,8 @@ os.environ.setdefault("GX_ANALYTICS_ENABLED", "false")
 import great_expectations as gx
 import great_expectations.expectations as gxe
 
-from app.services.catalog import ALLOWED_KWARGS
-from app.services.jsonutil import json_safe
+from quality.services.catalog import ALLOWED_KWARGS
+from quality.services.jsonutil import json_safe
 
 EXPECTATION_CLASSES = {
     "expect_column_values_to_not_be_null": gxe.ExpectColumnValuesToNotBeNull,

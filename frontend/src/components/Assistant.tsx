@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-import type { Health, Rule, Run, RunResult, TableDetail, TableSummary } from "@/lib/types";
+import type { Health, Rule, Run, RunResult, SuggestionResponse, TableDetail, TableSummary } from "@/lib/types";
 
 const TYPE_LABELS: Record<string, string> = {
   expect_column_values_to_not_be_null: "Required value",
@@ -115,12 +115,24 @@ export default function Assistant() {
       schema_name: table.schema_name,
       table_name: table.table_name,
     });
-    const [nextDetail, nextRules, nextRuns] = await Promise.all([
+    const [nextDetail, loadedRules, nextRuns] = await Promise.all([
       api<TableDetail>(`/api/tables/${table.schema_name}/${table.table_name}`),
       api<Rule[]>(`/api/rules?${query}`),
       api<Run[]>(`/api/runs?${query}`),
     ]);
     if (token !== requestToken.current) return;
+    let nextRules = loadedRules;
+    if (nextRules.length === 0) {
+      const suggestion = await api<SuggestionResponse>(
+        `/api/tables/${table.schema_name}/${table.table_name}/suggestions`,
+        { method: "POST" },
+      );
+      if (token !== requestToken.current) return;
+      nextRules = await api<Rule[]>(`/api/rules?${query}`);
+      if (suggestion.created.length > 0) {
+        setNote(`Added ${suggestion.created.length} checks from this table. ${suggestion.note}`);
+      }
+    }
     setDetail(nextDetail);
     setRules(nextRules);
     setHistory(nextRuns);
@@ -413,8 +425,8 @@ export default function Assistant() {
               </section>
 
               <section className="card">
-                <h2>Results</h2>
-                {!activeRun && <p className="muted">Run the checks to see what passes and what needs a look.</p>}
+                <h2>Quality report</h2>
+                {!activeRun && <p className="muted">Run the checks once. The report stays here until you run them again.</p>}
                 {activeRun && (
                   <>
                     <div className="summary-counts">
@@ -423,7 +435,20 @@ export default function Assistant() {
                       <span className="warn-count">{activeRun.warning_count} warnings</span>
                       {activeRun.error_count > 0 && <span className="fail-count">{activeRun.error_count} errors</span>}
                     </div>
-                    <p className="muted">Saved {formatWhen(activeRun.finished_at)}. Re-running uses these same checks.</p>
+                    <p className="muted">Saved {formatWhen(activeRun.finished_at)}. Opening this table again shows this report without re-running.</p>
+                    <ul className="report">
+                      {activeRun.results
+                        .filter((result) => result.outcome !== "passed")
+                        .map((result) => (
+                          <li key={result.id}>
+                            <strong>{result.title}</strong> · {result.outcome}
+                            {result.sample_failures.length > 0 && (
+                              <> — {result.sample_failures.slice(0, 3).map(formatValue).join(", ")}</>
+                            )}
+                            {result.error_message ? ` — ${result.error_message}` : ""}
+                          </li>
+                        ))}
+                    </ul>
                   </>
                 )}
                 {history.length > 1 && (

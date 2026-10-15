@@ -1,8 +1,7 @@
 """Language-model client.
 
-Development default is Google's Gemini free tier. Set LLM_PROVIDER=openai
-and OPENAI_API_KEY later to switch to a paid model without changing code.
-Groq is available the same way for another free-tier key.
+This project uses OpenAI (OPENAI_API_KEY and OPENAI_MODEL in backend/.env).
+Gemini and Groq remain optional when LLM_PROVIDER is changed.
 """
 
 from __future__ import annotations
@@ -12,9 +11,12 @@ import re
 from typing import Any
 
 import httpx
+import truststore
 
-from app.config import Settings
-from app.services.catalog import RuleDraft, coerce_rule
+truststore.inject_into_ssl()
+
+from quality.llm_config import LlmSettings
+from quality.services.catalog import RuleDraft, coerce_rule
 
 SYSTEM_RULES = """You help domain experts define data quality checks for one database table.
 Return JSON only, with this shape:
@@ -97,20 +99,26 @@ def _rules_from_payload(payload: dict[str, Any], columns: set[str]) -> list[Rule
     return drafts[:12]
 
 
-def _gemini(settings: Settings, system: str, user: str) -> str:
+def _post(url: str, headers: dict[str, str], body: dict[str, Any]) -> httpx.Response:
+    try:
+        return httpx.post(url, headers=headers, json=body, timeout=45)
+    except httpx.HTTPError as exc:
+        raise LlmError(f"Could not reach the model ({exc.__class__.__name__})") from exc
+
+
+def _gemini(settings: LlmSettings, system: str, user: str) -> str:
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{settings.gemini_model}:generateContent"
     )
-    response = httpx.post(
+    response = _post(
         url,
-        headers={"x-goog-api-key": settings.gemini_api_key, "Content-Type": "application/json"},
-        json={
+        {"x-goog-api-key": settings.gemini_api_key, "Content-Type": "application/json"},
+        {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [{"role": "user", "parts": [{"text": user}]}],
             "generationConfig": {"temperature": 0.2, "responseMimeType": "application/json"},
         },
-        timeout=45,
     )
     if response.status_code >= 400:
         raise LlmError(f"Gemini returned {response.status_code}: {_safe_error(response)}")
@@ -131,20 +139,15 @@ def _openai_compatible(url: str, api_key: str, model: str, system: str, user: st
             {"role": "user", "content": user},
         ],
     }
-    response = httpx.post(
-        url,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=body,
-        timeout=45,
-    )
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    response = _post(url, headers, body)
     if response.status_code == 400:
-        body.pop("response_format", None)
-        response = httpx.post(
-            url,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=body,
-            timeout=45,
-        )
+        detail = response.text.lower()
+        if "response_format" in detail:
+            body.pop("response_format", None)
+        if "temperature" in detail:
+            body.pop("temperature", None)
+        response = _post(url, headers, body)
     if response.status_code >= 400:
         raise LlmError(f"{provider} returned {response.status_code}: {_safe_error(response)}")
     data = response.json()
@@ -159,7 +162,7 @@ def _safe_error(response: httpx.Response) -> str:
     return re.sub(r"key=[^&\s]+", "key=redacted", text)
 
 
-def complete(settings: Settings, system: str, user: str) -> str:
+def complete(settings: LlmSettings, system: str, user: str) -> str:
     provider = settings.llm_provider.strip().lower()
     if provider == "openai":
         return _openai_compatible(
@@ -184,14 +187,14 @@ def complete(settings: Settings, system: str, user: str) -> str:
     raise LlmError(f"Unknown LLM provider: {settings.llm_provider}")
 
 
-def suggest_with_llm(settings: Settings, profile: dict[str, Any], columns: set[str]) -> list[RuleDraft]:
+def suggest_with_llm(settings: LlmSettings, profile: dict[str, Any], columns: set[str]) -> list[RuleDraft]:
     user = "Table profile:\n" + json.dumps(profile, default=str)
     text = complete(settings, SYSTEM_RULES, user)
     return _rules_from_payload(_extract_json(text), columns)
 
 
 def translate_with_llm(
-    settings: Settings, profile: dict[str, Any], columns: set[str], request: str
+    settings: LlmSettings, profile: dict[str, Any], columns: set[str], request: str
 ) -> list[RuleDraft]:
     user = (
         "Table profile:\n"

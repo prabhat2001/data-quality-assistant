@@ -150,7 +150,11 @@ h3 { margin: 0 0 0.35rem; font-size: 1.12rem; }
 
 .banner.error { background: var(--fail-bg); color: var(--fail); }
 
-.highlights { margin: 0.4rem 0 0; padding-left: 1.1rem; color: var(--muted); }
+.highlights, .report { margin: 0.4rem 0 0; padding-left: 1.1rem; color: var(--muted); }
+
+.report li { margin: 0.35rem 0; }
+
+.report strong { color: var(--ink); }
 
 .scroll {
   overflow-x: auto;

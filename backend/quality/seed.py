@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from django.db import connection, transaction
 
 SEED_SQL = """
 CREATE TABLE public.customers (
@@ -89,20 +88,20 @@ ANALYZE public.products;
 """
 
 
-def seed_if_needed(session: Session) -> bool:
-    exists = session.execute(
-        text(
+def seed_if_needed() -> bool:
+    with connection.cursor() as cursor:
+        cursor.execute(
             """
             SELECT 1 FROM information_schema.tables
             WHERE table_schema = 'public' AND table_name = 'customers'
             """
         )
-    ).first()
-    if exists:
-        return False
-    for statement in SEED_SQL.split(";"):
-        sql = statement.strip()
-        if sql:
-            session.execute(text(sql))
-    session.commit()
+        if cursor.fetchone():
+            return False
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            for statement in SEED_SQL.split(";"):
+                sql = statement.strip()
+                if sql:
+                    cursor.execute(sql)
     return True

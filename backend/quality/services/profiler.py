@@ -1,7 +1,7 @@
 """Read table shape and recommend checks from the data itself.
 
-This is the development path used when no LLM key is configured, and it is
-also the evidence the language model sees when a key is present.
+This is the path used when the OpenAI call fails, and it is also the evidence
+the model sees when OPENAI_API_KEY is set.
 """
 
 from __future__ import annotations
@@ -10,11 +10,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import text
-from sqlalchemy.orm import Session
-
-from app.services.catalog import RuleDraft, quote_ident, require_ident
-from app.services.jsonutil import json_safe
+from quality.services.catalog import RuleDraft, quote_ident, require_ident
+from quality.services.db import query_all, query_one, query_scalar
+from quality.services.jsonutil import json_safe
 
 NUMERIC_TYPES = {
     "smallint",
@@ -51,7 +49,7 @@ class ColumnProfile:
         return self.data_type in {"text", "character varying", "character"}
 
     def as_public(self) -> dict[str, Any]:
-        payload = {
+        return {
             "name": self.name,
             "data_type": self.data_type,
             "nullable": self.nullable,
@@ -61,6 +59,9 @@ class ColumnProfile:
             "min_value": json_safe(self.min_value),
             "max_value": json_safe(self.max_value),
         }
+
+    def for_prompt(self) -> dict[str, Any]:
+        payload = self.as_public()
         if self.top_values:
             payload["top_values"] = self.top_values
         return payload
@@ -95,40 +96,37 @@ class TableProfile:
             "schema": self.schema_name,
             "table": self.table_name,
             "row_count": self.row_count,
-            "columns": [column.as_public() for column in self.columns],
+            "columns": [column.for_prompt() for column in self.columns],
             "sample_rows": self.sample_rows[:5],
         }
 
 
-def _table_exists(session: Session, schema_name: str, table_name: str) -> bool:
-    row = session.execute(
-        text(
-            """
-            SELECT 1
-            FROM information_schema.tables
-            WHERE table_schema = :schema_name AND table_name = :table_name
-            """
-        ),
+def _table_exists(schema_name: str, table_name: str) -> bool:
+    row = query_one(
+        """
+        SELECT 1 AS present
+        FROM information_schema.tables
+        WHERE table_schema = %(schema_name)s AND table_name = %(table_name)s
+        """,
         {"schema_name": schema_name, "table_name": table_name},
-    ).first()
+    )
     return row is not None
 
 
-def list_tables(session: Session) -> list[dict[str, Any]]:
-    rows = session.execute(
-        text(
-            """
-            SELECT n.nspname AS schema_name,
-                   c.relname AS table_name,
-                   GREATEST(c.reltuples, 0)::bigint AS estimate
-            FROM pg_class c
-            JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE c.relkind = 'r'
-              AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'dq')
-            ORDER BY n.nspname, c.relname
-            """
-        )
-    ).mappings()
+def list_tables() -> list[dict[str, Any]]:
+    rows = query_all(
+        """
+        SELECT n.nspname AS schema_name,
+               c.relname AS table_name,
+               GREATEST(c.reltuples, 0)::bigint AS estimate
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind = 'r'
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'dq')
+          AND c.relname NOT LIKE 'django\\_%' ESCAPE '\\'
+        ORDER BY n.nspname, c.relname
+        """
+    )
     tables = []
     for row in rows:
         schema_name = row["schema_name"]
@@ -138,31 +136,28 @@ def list_tables(session: Session) -> list[dict[str, Any]]:
         estimate = int(row["estimate"] or 0)
         if estimate <= 0:
             qualified = f"{quote_ident(schema_name)}.{quote_ident(table_name)}"
-            estimate = int(session.execute(text(f"SELECT COUNT(*) FROM {qualified}")).scalar() or 0)
+            estimate = int(query_scalar(f"SELECT COUNT(*) FROM {qualified}") or 0)
         tables.append(
             {"schema_name": schema_name, "table_name": table_name, "row_count": estimate}
         )
     return tables
 
 
-def profile_table(session: Session, schema_name: str, table_name: str) -> TableProfile:
+def profile_table(schema_name: str, table_name: str) -> TableProfile:
     schema_name = require_ident(schema_name)
     table_name = require_ident(table_name)
-    if not _table_exists(session, schema_name, table_name):
+    if not _table_exists(schema_name, table_name):
         raise LookupError(f"Table {schema_name}.{table_name} was not found")
 
-    meta = session.execute(
-        text(
-            """
-            SELECT column_name, data_type, is_nullable
-            FROM information_schema.columns
-            WHERE table_schema = :schema_name AND table_name = :table_name
-            ORDER BY ordinal_position
-            """
-        ),
+    column_meta = query_all(
+        """
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = %(schema_name)s AND table_name = %(table_name)s
+        ORDER BY ordinal_position
+        """,
         {"schema_name": schema_name, "table_name": table_name},
-    ).mappings()
-    column_meta = list(meta)
+    )
     if not column_meta:
         raise LookupError(f"Table {schema_name}.{table_name} has no columns")
 
@@ -179,13 +174,13 @@ def profile_table(session: Session, schema_name: str, table_name: str) -> TableP
             select_bits.append(f'MAX({quoted}) AS "{name}__max"')
 
     qualified = f"{quote_ident(schema_name)}.{quote_ident(table_name)}"
-    stats = session.execute(text(f"SELECT {', '.join(select_bits)} FROM {qualified}")).mappings().one()
-    row_count = int(stats["row_count"] or 0)
+    stats = query_one(f"SELECT {', '.join(select_bits)} FROM {qualified}") or {}
+    row_count = int(stats.get("row_count") or 0)
 
     columns: list[ColumnProfile] = []
     for column in column_meta:
         name = column["column_name"]
-        present = int(stats[f"{name}__present"] or 0)
+        present = int(stats.get(f"{name}__present") or 0)
         null_count = row_count - present
         profile = ColumnProfile(
             name=name,
@@ -193,30 +188,28 @@ def profile_table(session: Session, schema_name: str, table_name: str) -> TableP
             nullable=column["is_nullable"] == "YES",
             null_count=null_count,
             null_percent=(100.0 * null_count / row_count) if row_count else 0.0,
-            distinct_count=int(stats[f"{name}__distinct"] or 0),
-            min_value=stats.get(f"{name}__min"),
-            max_value=stats.get(f"{name}__max"),
+            distinct_count=int(stats.get(f"{name}__distinct") or 0),
+            min_value=json_safe(stats.get(f"{name}__min")),
+            max_value=json_safe(stats.get(f"{name}__max")),
         )
         if profile.is_text and 1 < profile.distinct_count <= 15 and row_count:
             quoted = quote_ident(name)
-            grouped = session.execute(
-                text(
-                    f"""
-                    SELECT {quoted} AS value, COUNT(*) AS count
-                    FROM {qualified}
-                    WHERE {quoted} IS NOT NULL
-                    GROUP BY 1
-                    ORDER BY count DESC, value
-                    LIMIT 15
-                    """
-                )
-            ).mappings()
+            grouped = query_all(
+                f"""
+                SELECT {quoted} AS value, COUNT(*) AS count
+                FROM {qualified}
+                WHERE {quoted} IS NOT NULL
+                GROUP BY 1
+                ORDER BY count DESC, value
+                LIMIT 15
+                """
+            )
             profile.top_values = [
                 {"value": json_safe(item["value"]), "count": int(item["count"])} for item in grouped
             ]
         columns.append(profile)
 
-    sample_result = session.execute(text(f"SELECT * FROM {qualified} LIMIT 8")).mappings()
+    sample_result = query_all(f"SELECT * FROM {qualified} LIMIT 8")
     sample_rows = [{key: json_safe(value) for key, value in row.items()} for row in sample_result]
     return TableProfile(schema_name, table_name, row_count, columns, sample_rows)
 
@@ -249,29 +242,27 @@ def _allowed_set(top_values: list[dict[str, Any]]) -> list[Any]:
     return []
 
 
-def _lookup_ids(session: Session, schema_name: str, referenced_table: str) -> list[Any] | None:
-    if not _table_exists(session, schema_name, referenced_table):
+def _lookup_ids(schema_name: str, referenced_table: str) -> list[Any] | None:
+    if not _table_exists(schema_name, referenced_table):
         return None
-    columns = session.execute(
-        text(
-            """
-            SELECT column_name FROM information_schema.columns
-            WHERE table_schema = :schema_name AND table_name = :table_name AND column_name = 'id'
-            """
-        ),
+    columns = query_one(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema = %(schema_name)s AND table_name = %(table_name)s AND column_name = 'id'
+        """,
         {"schema_name": schema_name, "table_name": referenced_table},
-    ).first()
+    )
     if columns is None:
         return None
     qualified = f"{quote_ident(schema_name)}.{quote_ident(referenced_table)}"
-    rows = session.execute(text(f"SELECT id FROM {qualified} ORDER BY id LIMIT 201")).scalars()
-    values = [json_safe(value) for value in rows]
+    rows = query_all(f"SELECT id FROM {qualified} ORDER BY id LIMIT 201")
+    values = [json_safe(value["id"]) for value in rows]
     if not values or len(values) > 200:
         return None
     return values
 
 
-def recommend_rules(session: Session, profile: TableProfile) -> list[RuleDraft]:
+def recommend_rules(profile: TableProfile) -> list[RuleDraft]:
     drafts: list[RuleDraft] = []
     if profile.row_count == 0:
         return [
@@ -317,7 +308,7 @@ def recommend_rules(session: Session, profile: TableProfile) -> list[RuleDraft]:
             if not referenced.endswith("s"):
                 referenced += "s"
             if IDENT_OK(referenced):
-                ids = _lookup_ids(session, profile.schema_name, referenced)
+                ids = _lookup_ids(profile.schema_name, referenced)
                 if ids:
                     drafts.append(
                         _draft(
@@ -483,4 +474,3 @@ def _dedupe(drafts: list[RuleDraft]) -> list[RuleDraft]:
         seen.add(key)
         unique.append(draft)
     return unique
-

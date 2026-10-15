@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import re
 
-from app.services.catalog import RuleDraft
-from app.services.profiler import ColumnProfile
+from quality.services.catalog import RuleDraft
+from quality.services.profiler import ColumnProfile
 
 EMAIL_REGEX = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
